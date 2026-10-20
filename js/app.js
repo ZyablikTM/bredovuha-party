@@ -31,6 +31,12 @@
     'wss://broker.hivemq.com:8884/mqtt'
   ];
   const BROKER_LABELS = { 'broker.emqx.io': 'EMQX', 'test.mosquitto.org': 'Mosquitto', 'broker.hivemq.com': 'HiveMQ' };
+  // Свой сервер-пересыльщик в Yandex Cloud (server/relay): работает из России без замедлений.
+  // Подключается сразу, не дожидаясь библиотеки MQTT, и работает рядом с брокерами.
+  const RELAY_URL = 'wss://d5d2q4uhnnelv6sam40f.l5v6loqa.apigw.yandexcloud.net/ws';
+  const RELAY_LABEL = 'Яндекс';
+  // Отладка: ?net=relay — только сервер в Яндексе (без MQTT и связи между вкладками)
+  const NET_ONLY = new URLSearchParams(window.location.search).get('net');
   const HOST_HEARTBEAT_MS = 4000;   // ведущий повторно рассылает состояние
   const PLAYER_PING_MS = 4000;      // игрок сообщает «я на связи»
   const OFFLINE_AFTER_MS = 13000;   // без сигнала дольше — считаем офлайн
@@ -408,17 +414,110 @@
   }
 
   // ===========================================================================
-  // ТРАНСПОРТЫ: MQTT (2 брокера) + BroadcastChannel
+  // ТРАНСПОРТЫ: свой сервер в Яндексе + MQTT (3 брокера) + BroadcastChannel
   // ===========================================================================
+
+  // Клиент сервера-пересыльщика с тем же интерфейсом, что у MQTT-клиента:
+  // connected, on(), subscribe(), publish(), end(). Протокол — в server/relay/index.js.
+  // Сервер не рассылает «всем подписчикам»: ведущий сам перечисляет соединения игроков,
+  // которые он видел в последние PEER_TTL_MS (игроки шлют PING каждые 4 с).
+  function createRelayClient(url, role) {
+    const PEER_TTL_MS = 30000;
+    const RECONNECT_MS = 2000;
+    const REHOST_MS = 30000;
+    const handlers = {};
+    const peers = new Map();         // только у ведущего: соединение игрока -> когда видели
+    let ws = null;
+    let ended = false;
+    let reconnectTimer = null;
+    let rehostTimer = null;
+    let hostTopic = null;
+    const emit = (e, ...args) => (handlers[e] || []).forEach(fn => { try { fn(...args); } catch (err) {} });
+    const raw = (obj) => { try { ws.send(JSON.stringify(obj)); } catch (e) {} };
+
+    const client = {
+      connected: false,
+      on(e, fn) { (handlers[e] = handlers[e] || []).push(fn); return client; },
+      subscribe(topic) {
+        // Игроку подписываться не нужно: ведущий узнаёт его соединение по первому сообщению
+        if (role !== 'host' || !/\/to_host$/.test(topic)) return;
+        hostTopic = topic;
+        if (client.connected) raw({ op: 'host', t: topic });
+        clearInterval(rehostTimer);
+        rehostTimer = setInterval(() => { if (client.connected) raw({ op: 'host', t: hostTopic }); }, REHOST_MS);
+      },
+      publish(topic, payload) {
+        if (!client.connected) return;
+        if (role === 'host') {
+          const now = Date.now();
+          const to = [];
+          peers.forEach((t, c) => { if (now - t < PEER_TTL_MS) to.push(c); else peers.delete(c); });
+          if (to.length) raw({ op: 'pub', t: topic, d: payload, to });
+        } else {
+          raw({ op: 'pub', t: topic, d: payload });
+        }
+      },
+      end() {
+        ended = true;
+        clearTimeout(reconnectTimer);
+        clearInterval(rehostTimer);
+        client.connected = false;
+        try { if (ws) ws.close(); } catch (e) {}
+        emit('end');
+      }
+    };
+
+    function connect() {
+      if (ended) return;
+      try { ws = new WebSocket(url); } catch (e) { scheduleReconnect(); return; }
+      const sock = ws;
+      sock.onopen = () => {
+        if (sock !== ws || ended) return;
+        client.connected = true;
+        if (hostTopic) raw({ op: 'host', t: hostTopic });
+        emit('connect');
+      };
+      sock.onmessage = (ev) => {
+        if (sock !== ws || !ev.data) return;
+        let m;
+        try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (m.op === 'gone' && Array.isArray(m.gone)) { m.gone.forEach(c => peers.delete(c)); return; }
+        if (typeof m.d !== 'string') return;
+        if (role === 'host' && m.from) peers.set(m.from, Date.now());
+        emit('message', m.t, m.d);
+      };
+      sock.onerror = (ev) => emit('error', new Error('websocket error'));
+      // Сервер закрывает соединение через 60 минут или после 10 минут тишины — переподключаемся
+      sock.onclose = () => {
+        if (sock !== ws) return;
+        const was = client.connected;
+        client.connected = false;
+        if (was) emit('close');
+        if (!ended) { emit('offline'); scheduleReconnect(); }
+      };
+    }
+    function scheduleReconnect() {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => { if (!ended) { emit('reconnect'); connect(); } }, RECONNECT_MS);
+    }
+    connect();
+    return client;
+  }
+
+  function setupNet() {
+    net.startedAt = Date.now();
+    if (RELAY_URL && 'WebSocket' in window) {
+      attachTransport(createRelayClient(RELAY_URL, mpRole), RELAY_URL);
+    }
+    if (NET_ONLY !== 'relay') setupMqtt();
+  }
+
   function setupMqtt() {
     clearTimeout(net.mqttWaitTimer);
     if (typeof mqtt === 'undefined') {
       net.mqttWaitTimer = setTimeout(setupMqtt, 500);
       return;
     }
-    const role = mpRole;
-    const code = roomCode;
-    net.startedAt = Date.now();
     MQTT_BROKERS.forEach(url => {
       let client;
       try {
@@ -432,6 +531,14 @@
       } catch (e) {
         return;
       }
+      attachTransport(client, url);
+    });
+  }
+
+  function attachTransport(client, url) {
+    const role = mpRole;
+    const code = roomCode;
+    {
       const entry = { client, url, t0: Date.now(), log: [] };
       const note = (e, x) => { if (entry.log.length < 40) entry.log.push(`${e}@${Date.now() - entry.t0}${x ? ':' + x : ''}`); };
       net.mqtt.push(entry);
@@ -459,7 +566,7 @@
       client.on('close', updateNetStatus);
       client.on('offline', updateNetStatus);
       client.on('error', () => {});
-    });
+    }
   }
 
   function mqttPublish(topic, msg, opts) {
@@ -477,17 +584,21 @@
 
   // Подробный статус связи: какие серверы подключены, загрузилась ли библиотека
   function netDetails() {
-    if (typeof mqtt === 'undefined') {
-      return window.__mqttLib === 'failed' ? '⚠️ не загрузилась библиотека связи — проверьте интернет и обновите страницу' : 'загружаем библиотеку связи…';
+    if (!net.mqtt.length) {
+      if (window.__mqttLib === 'failed') return '⚠️ не загрузилась библиотека связи — проверьте интернет и обновите страницу';
+      return 'подключаемся к серверам…';
     }
-    if (!net.mqtt.length) return 'подключаемся к серверам…';
-    return net.mqtt.map(m => {
+    const parts = net.mqtt.map(m => {
       const host = (m.url.match(/wss:\/\/([^:/]+)/) || [])[1];
-      return `${BROKER_LABELS[host] || host} ${m.client.connected ? '✓' : '…'}`;
-    }).join(' · ');
+      const label = m.url === RELAY_URL ? RELAY_LABEL : (BROKER_LABELS[host] || host);
+      return `${label} ${m.client.connected ? '✓' : '…'}`;
+    });
+    if (typeof mqtt === 'undefined' && window.__mqttLib !== 'failed') parts.push('запасные загружаются…');
+    return parts.join(' · ');
   }
 
   function setupBroadcast() {
+    if (NET_ONLY === 'relay') return;
     try {
       if ('BroadcastChannel' in window) {
         net.bc = new BroadcastChannel(NET_NS + '_' + roomCode);
@@ -517,7 +628,7 @@
     netHistory.push(`reconnectTransports @${new Date().toISOString().slice(11, 19)} (${document.visibilityState})`);
     teardownNet();
     setupBroadcast();
-    setupMqtt();
+    setupNet();
   }
 
   function startTick(fn, ms) {
@@ -1262,7 +1373,7 @@
   };
 
   function inviteUrl() {
-    return `${window.location.href.split('?')[0].split('#')[0]}?room=${roomCode}`;
+    return `${window.location.href.split('?')[0].split('#')[0]}?room=${roomCode}${NET_ONLY ? '&net=' + NET_ONLY : ''}`;
   }
 
   function enterHostMode() {
@@ -1289,7 +1400,7 @@
     $('qr-box').innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=0&data=${encodeURIComponent(url)}" alt="QR-код приглашения" class="w-52 h-52" />`;
 
     setupBroadcast();
-    setupMqtt();
+    setupNet();
     startTick(hostTick, 400);
     requestWakeLock();
     broadcastNow();
@@ -1820,7 +1931,7 @@
     $('pl-room').textContent = `Комната ${code}`;
 
     setupBroadcast();
-    setupMqtt();
+    setupNet();
     sendJoin();
     startTick(playerTick, 1000);
     renderPlayer();
