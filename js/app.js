@@ -376,6 +376,7 @@
       hostNow: 0,
       usedQ: [],
       players: {},
+      hostPid: null,            // ID игрока-ведущего, если ведущий тоже играет
       kicked: [],
       options: null,
       reveal: null,
@@ -544,6 +545,7 @@
   // ВЕДУЩИЙ: приём сообщений
   // ===========================================================================
   function isPlayerOnline(pid, now = Date.now()) {
+    if (pid === gameState.hostPid) return true;
     const t = lastSeen[pid] ?? hostBootAt;
     return now - t < OFFLINE_AFTER_MS;
   }
@@ -1081,8 +1083,44 @@
     broadcastNow();
   };
 
+  // Ведущий тоже играет: его место — обычный игрок, но действия применяются сразу, без сети
+  function addHostPlayer(name) {
+    gameState.hostPid = myPlayerId;
+    gameState.secret.keys[myPlayerId] = myKey;
+    gameState.players[myPlayerId] = {
+      id: myPlayerId,
+      name: uniqueName(sanitizeName(name) || 'Ведущий', myPlayerId),
+      avatar: pickAvatar(myAvatar, myPlayerId),
+      score: 0,
+      likes: 0,
+      rejects: 0,
+      lastSeq: 0,
+      joinedAt: Date.now()
+    };
+  }
+
+  window.hostTogglePlay = function (on) {
+    if (mpRole !== 'host' || gameState.phase !== 'LOBBY') return;
+    if (on) {
+      if (gameState.players[myPlayerId]) return;
+      if (Object.keys(gameState.players).length >= MAX_PLAYERS) {
+        showToast('Комната заполнена', 'warn');
+        broadcastNow();
+        return;
+      }
+      addHostPlayer(lstore.get('bred_last_name') || 'Ведущий');
+      Sound.join();
+    } else {
+      if (gameState.hostPid && gameState.players[gameState.hostPid]) myAvatar = gameState.players[gameState.hostPid].avatar;
+      if (gameState.hostPid) delete gameState.players[gameState.hostPid];
+      gameState.hostPid = null;
+    }
+    broadcastNow();
+  };
+
   window.hostKick = function (pid) {
     const p = gameState.players[pid];
+    if (pid === gameState.hostPid) return;
     if (!p || !confirm(`Удалить игрока «${p.name}» из комнаты?`)) return;
     delete gameState.players[pid];
     delete lastSeen[pid];
@@ -1100,6 +1138,13 @@
   window.startHostSession = function () {
     const saved = loadHostSession();
     if (saved && !confirm(`У вас есть незакрытая комната ${saved.state.roomCode}. Создать новую вместо неё?`)) return;
+    const plays = $('create-play').checked;
+    const name = sanitizeName($('create-name').value);
+    if (plays && !name) {
+      showToast('Введите ваше имя — вы ведь тоже играете!', 'warn');
+      $('create-name').focus();
+      return;
+    }
     if (saved) publishRoomClosed(saved.state);
     gameState = freshGameState({
       roomCode: makeRoomCode(),
@@ -1108,6 +1153,10 @@
       lieSec: Number($('create-lie').value) || 45,
       voteSec: Number($('create-vote').value) || 30
     });
+    if (plays) {
+      lstore.set('bred_last_name', name);
+      addHostPlayer(name);
+    }
     enterHostMode();
   };
 
@@ -1120,6 +1169,14 @@
     }
     gameState = saved.state;
     gameState.kicked = gameState.kicked || [];
+    // Ведущий-игрок продолжает играть своим местом, даже если комнату восстановили в другой вкладке
+    if (gameState.hostPid && gameState.players[gameState.hostPid]) {
+      myPlayerId = gameState.hostPid;
+      sstore.set('bred_pid_v1', myPlayerId);
+      if (gameState.secret.keys[myPlayerId]) myKey = gameState.secret.keys[myPlayerId];
+      sstore.set('bred_key_v1', myKey);
+      myAvatar = gameState.players[myPlayerId].avatar;
+    }
     // Таймер текущей фазы перезапускается, чтобы игроки не потеряли время на перезагрузку
     if (gameState.phase === 'LIE') gameState.deadline = Date.now() + gameState.settings.lieSec * 1000;
     if (gameState.phase === 'VOTE') gameState.deadline = Date.now() + gameState.settings.voteSec * 1000;
@@ -1182,6 +1239,7 @@
     stopTick();
     mpRole = 'host';
     roomCode = gameState.roomCode;
+    local = loadLocal(roomCode);
     hostBootAt = Date.now();
     lastBroadcastAt = 0;
     Object.keys(lastSeen).forEach(k => delete lastSeen[k]);
@@ -1190,6 +1248,8 @@
     $('host-view').classList.remove('hidden');
     $('player-view').classList.add('hidden');
     $('host-stage').dataset.key = '';
+    $('player-stage').innerHTML = '';
+    $('player-stage').dataset.key = '';
 
     const url = inviteUrl();
     $('host-code').textContent = roomCode;
@@ -1393,12 +1453,43 @@
     return `${st.phase}:${st.stage}`;
   }
 
-  function renderHost() {
+  function hostIsPlaying() {
+    return !!(gameState.hostPid && gameState.hostPid === myPlayerId && gameState.players[myPlayerId]);
+  }
+
+  function renderHost(forceFrame) {
     if (mpRole !== 'host') return;
     renderHostNetStatus();
     const stageEl = $('host-stage');
-    const key = hostViewKey();
     const st = gameState;
+
+    if (local.lastStage !== st.stage) {
+      local.lastStage = st.stage;
+      local.lieError = '';
+      local.pendingLie = null;
+      local.pendingVote = null;
+    }
+
+    // Ведущий играет сам: вместо большого экрана — его пульт и полоса управления комнатой
+    if (hostIsPlaying() && st.phase !== 'LOBBY') {
+      if (stageEl.dataset.key !== 'HP') {
+        stageEl.dataset.key = 'HP';
+        stageEl.innerHTML = '<div class="max-w-xl mx-auto"><div id="hp-ctl" class="mb-3"></div><div id="hp-stage"></div></div>';
+      }
+      const pub = buildPublicState();
+      $('hp-ctl').innerHTML = hostControlsHtml(pub);
+      paintPlayerPanel($('hp-stage'), pub, pub.players[myPlayerId], forceFrame);
+      if (st.phase === 'REVEAL' && st.reveal) {
+        const stepKey = st.stage + ':' + st.reveal.step;
+        if (local.lastRevealStep !== stepKey) {
+          local.lastRevealStep = stepKey;
+          playRevealSound(st);
+        }
+      }
+      return;
+    }
+
+    const key = hostViewKey();
     if (stageEl.dataset.key !== key) {
       stageEl.dataset.key = key;
       stageEl.innerHTML = hostFrame(buildPublicState());
@@ -1446,7 +1537,10 @@
               <button type="button" id="h-start-btn" onclick="window.hostStartGame()" class="mt-4 w-full py-4 rounded-2xl font-display font-black text-xl bg-gradient-to-r from-pink-500 via-fuchsia-500 to-violet-600 hover:brightness-110 neon-pink transition disabled:opacity-40 disabled:shadow-none">
                 Начать игру ▶
               </button>
-              <p class="mt-2 text-xs text-violet-300/80 text-center">Ведущий может играть и сам: нажмите «🧪 Тест-игрок» или откройте ссылку на своём телефоне.</p>
+              <label class="mt-3 flex items-center justify-center gap-2 text-sm font-semibold cursor-pointer select-none">
+                <input type="checkbox" id="h-set-play" onchange="window.hostTogglePlay(this.checked)" class="w-5 h-5 accent-pink-500" />
+                🎮 Я тоже играю с этого устройства
+              </label>
             </div>
           </div>
         </div>`;
@@ -1541,11 +1635,12 @@
       if (box) {
         box.innerHTML = players.length ? players.map(p => {
           const on = isPlayerOnline(p.id, now);
-          return `<div class="flex items-center gap-2 bg-black/30 border border-violet-800/60 rounded-xl px-2.5 py-2 pop-in">
+          const isHost = p.id === st.hostPid;
+          return `<div class="flex items-center gap-2 bg-black/30 border ${isHost ? 'border-pink-500/70' : 'border-violet-800/60'} rounded-xl px-2.5 py-2 pop-in">
             <span class="text-2xl">${p.avatar}</span>
-            <span class="flex-1 min-w-0 font-semibold text-sm truncate">${escapeHtml(p.name)}</span>
+            <span class="flex-1 min-w-0 font-semibold text-sm truncate">${isHost ? '👑 ' : ''}${escapeHtml(p.name)}</span>
             <span class="w-2 h-2 rounded-full ${on ? 'bg-emerald-400' : 'bg-slate-500'}" title="${on ? 'На связи' : 'Нет связи'}"></span>
-            <button type="button" onclick="window.hostKick('${p.id}')" class="text-slate-400 hover:text-rose-400 text-xs" title="Удалить">✕</button>
+            ${isHost ? '' : `<button type="button" onclick="window.hostKick('${p.id}')" class="text-slate-400 hover:text-rose-400 text-xs" title="Удалить">✕</button>`}
           </div>`;
         }).join('') : '<div class="col-span-full text-sm text-violet-300/80 py-6 text-center">Пока никого… Отправьте друзьям ссылку или QR-код 👈</div>';
       }
@@ -1561,6 +1656,8 @@
       setVal('h-set-rounds', st.settings.rounds);
       setVal('h-set-lie', st.settings.lieSec);
       setVal('h-set-vote', st.settings.voteSec);
+      const play = $('h-set-play');
+      if (play) play.checked = hostIsPlaying();
     }
 
     if (st.phase === 'LIE' || st.phase === 'VOTE') {
@@ -1579,6 +1676,38 @@
     }
   }
 
+  // Полоса управления комнатой над пультом, когда ведущий играет сам
+  function hostControlsHtml(st) {
+    const players = Object.values(st.players);
+    const wrap = (inner) => `<div class="glass rounded-2xl px-3 py-2.5 flex items-center justify-between gap-2 text-sm border-pink-500/40">${inner}</div>`;
+    const crown = '<span class="font-semibold text-pink-300">👑 Ведущий</span>';
+    const smallBtn = (label) => `<button type="button" onclick="window.hostSkip()" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-black/40 border border-violet-700 hover:border-pink-500 whitespace-nowrap">${label}</button>`;
+    const bigBtn = (onclick, label, cls) => `<button type="button" onclick="${onclick}" class="w-full py-3.5 rounded-2xl font-display font-black text-lg ${cls} hover:brightness-110 transition">${label}</button>`;
+
+    if (st.phase === 'LIE') {
+      return wrap(`${crown}<span class="text-violet-200">Сдали ложь: <b>${players.filter(p => p.hasLie).length}/${players.length}</b></span>${smallBtn('⏩ Хватит ждать')}`);
+    }
+    if (st.phase === 'VOTE') {
+      return wrap(`${crown}<span class="text-violet-200">Голосов: <b>${players.filter(p => p.hasVote).length}/${players.length}</b></span>${smallBtn('⏩ Вскрываем!')}`);
+    }
+    if (st.phase === 'REVEAL') {
+      return wrap(`${crown}<span class="text-violet-200">Вскрытие</span>${smallBtn('⏭ Дальше')}`);
+    }
+    if (st.phase === 'SCORES') {
+      const last = st.round >= st.totalRounds;
+      const nextFinal = st.round + 1 === st.totalRounds;
+      return bigBtn('window.hostNext()', last ? 'Итоги игры 🏆' : (nextFinal ? 'ФИНАЛЬНЫЙ РАУНД 🔥 ×2' : 'Следующий вопрос ▶'),
+        `bg-gradient-to-r ${nextFinal ? 'from-orange-500 to-rose-600' : 'from-pink-500 to-violet-600'} neon-pink`);
+    }
+    if (st.phase === 'FINAL') {
+      return `<div class="grid grid-cols-2 gap-2">
+        ${bigBtn('window.hostPlayAgain()', '🔁 Ещё раз', 'bg-gradient-to-r from-pink-500 to-violet-600 neon-pink')}
+        ${bigBtn('window.hostCloseRoom()', '🚪 Закрыть', 'bg-black/40 border border-violet-700')}
+      </div>`;
+    }
+    return '';
+  }
+
   function playRevealSound(st) {
     const rv = st.reveal;
     if (!rv) return;
@@ -1590,20 +1719,25 @@
   // ===========================================================================
   // ИГРОК: подключение
   // ===========================================================================
+  // Выбор аватара есть в обеих карточках лобби; выбор синхронизируется
   function renderAvatarPicker() {
-    const box = $('join-avatars');
     const saved = lstore.get('bred_last_avatar');
     myAvatar = AVATARS.includes(saved) ? saved : AVATARS[randInt(AVATARS.length)];
-    box.innerHTML = AVATARS.map(a => `
-      <label class="avatar-pick cursor-pointer">
-        <input type="radio" name="avatar" value="${a}" class="sr-only" ${a === myAvatar ? 'checked' : ''} />
-        <span class="flex items-center justify-center aspect-square rounded-xl bg-black/40 border border-violet-800 text-xl sm:text-2xl transition">${a}</span>
-      </label>`).join('');
-    box.querySelectorAll('input').forEach(inp => inp.addEventListener('change', () => {
-      myAvatar = inp.value;
-      lstore.set('bred_last_avatar', myAvatar);
-      Sound.pop();
-    }));
+    lstore.set('bred_last_avatar', myAvatar);
+    ['join-avatars', 'create-avatars'].forEach(id => {
+      const box = $(id);
+      box.innerHTML = AVATARS.map(a => `
+        <label class="avatar-pick cursor-pointer">
+          <input type="radio" name="${id}" value="${a}" class="sr-only" ${a === myAvatar ? 'checked' : ''} />
+          <span class="flex items-center justify-center aspect-square rounded-xl bg-black/40 border border-violet-800 text-xl sm:text-2xl transition">${a}</span>
+        </label>`).join('');
+      box.querySelectorAll('input').forEach(inp => inp.addEventListener('change', () => {
+        myAvatar = inp.value;
+        lstore.set('bred_last_avatar', myAvatar);
+        document.querySelectorAll(`#join-avatars input, #create-avatars input`).forEach(o => { o.checked = o.value === myAvatar; });
+        Sound.pop();
+      }));
+    });
   }
 
   window.startPlayerSession = function () {
@@ -1648,6 +1782,8 @@
     $('host-view').classList.add('hidden');
     $('player-view').classList.remove('hidden');
     $('player-stage').dataset.key = '';
+    $('host-stage').innerHTML = '';
+    $('host-stage').dataset.key = '';
     $('pl-name').textContent = name;
     $('pl-avatar').textContent = myAvatar;
     $('pl-room').textContent = `Комната ${code}`;
@@ -1878,8 +2014,32 @@
     return (o.marks || []).includes(hash8(myKey + ':' + o.oid));
   }
 
+  // Состояние глазами игрока: у ведущего-игрока — публичная версия его собственного состояния
+  function viewState() {
+    return mpRole === 'host' ? buildPublicState() : gameState;
+  }
+
+  // Ведущий-игрок применяет свои действия сразу, остальные шлют их ведущему
+  function sendAction(action) {
+    if (mpRole === 'host') {
+      const p = gameState.players[myPlayerId];
+      if (!p || myPlayerId !== gameState.hostPid) return false;
+      if (action.kind === 'lie') applyLie(p, action);
+      else if (action.kind === 'vote') applyVote(p, action.oid);
+      else if (action.kind === 'like') applyLike(p, action.oid);
+      scheduleBroadcast();
+      return true;
+    }
+    return enqueueAction(action);
+  }
+
+  function rerender(forceFrame) {
+    if (mpRole === 'host') renderHost(forceFrame);
+    else renderPlayer(forceFrame);
+  }
+
   window.playerSubmitLie = function () {
-    const st = gameState;
+    const st = viewState();
     const me = st.players[myPlayerId];
     if (st.phase !== 'LIE' || !me || me.hasLie || local.pendingLie === st.stage) return;
     const input = $('p-lie-input');
@@ -1892,58 +2052,58 @@
     if (isTooCloseToTruth(text, q)) {
       local.lieError = TRUTH_HIT_MSG;
       Sound.fail();
-      renderPlayer(true);
+      rerender(true);
       return;
     }
-    if (!enqueueAction({ kind: 'lie', text })) return;
+    if (!sendAction({ kind: 'lie', text })) return;
     local.lies[st.stage] = { text, auto: false };
     local.pendingLie = st.stage;
     local.lieError = '';
     saveLocal();
     Sound.submit();
-    renderPlayer();
+    rerender();
   };
 
   window.playerAutoLie = function () {
-    const st = gameState;
+    const st = viewState();
     const me = st.players[myPlayerId];
     const q = currentQuestion();
     if (st.phase !== 'LIE' || !me || me.hasLie || local.pendingLie === st.stage || !q) return;
     const text = q.fakeLies[randInt(q.fakeLies.length)];
-    if (!enqueueAction({ kind: 'lie', text, auto: true })) return;
+    if (!sendAction({ kind: 'lie', text, auto: true })) return;
     local.lies[st.stage] = { text, auto: true };
     local.pendingLie = st.stage;
     local.lieError = '';
     saveLocal();
     Sound.submit();
-    renderPlayer();
+    rerender();
   };
 
   window.playerVote = function (oid) {
-    const st = gameState;
+    const st = viewState();
     const me = st.players[myPlayerId];
     if (st.phase !== 'VOTE' || !me || me.hasVote || local.pendingVote === st.stage) return;
     const o = (st.options || []).find(x => x.oid === oid);
     if (!o || isMyOption(o)) return;
-    if (!enqueueAction({ kind: 'vote', oid })) return;
+    if (!sendAction({ kind: 'vote', oid })) return;
     local.votes[st.stage] = oid;
     local.pendingVote = st.stage;
     saveLocal();
     Sound.pop();
-    renderPlayer();
+    rerender();
   };
 
   window.playerLike = function (oid) {
-    const st = gameState;
+    const st = viewState();
     const me = st.players[myPlayerId];
     if (st.phase !== 'VOTE' || !me || me.liked || local.likes[st.stage]) return;
     const o = (st.options || []).find(x => x.oid === oid);
     if (!o || isMyOption(o)) return;
-    if (!enqueueAction({ kind: 'like', oid })) return;
+    if (!sendAction({ kind: 'like', oid })) return;
     local.likes[st.stage] = oid;
     saveLocal();
     Sound.pop();
-    renderPlayer();
+    rerender();
   };
 
   // ===========================================================================
@@ -1970,10 +2130,8 @@
     $('pl-conn-info').textContent = `${text} • серверы ${mq}/${MQTT_BROKERS.length}`;
   }
 
-  function playerViewKey() {
-    const st = gameState;
+  function playerViewKey(st, me) {
     if (playerHalted) return 'HALT:' + playerHalted;
-    const me = st.players[myPlayerId];
     if (!me) return 'WAIT:' + (Object.keys(st.players).length >= MAX_PLAYERS && lastStateV >= 0 ? 'full' : 'conn');
     if (st.phase === 'LOBBY') return 'LOBBY';
     if (st.phase === 'LIE') {
@@ -1998,8 +2156,12 @@
       $('pl-name').textContent = me.name;
       $('pl-score').textContent = fmt(me.score);
     }
-    const stageEl = $('player-stage');
-    const key = playerViewKey();
+    paintPlayerPanel($('player-stage'), st, me, forceFrame);
+  }
+
+  // Пульт игрока; общий для обычного игрока и ведущего, который играет сам
+  function paintPlayerPanel(stageEl, st, me, forceFrame) {
+    const key = playerViewKey(st, me);
     if (forceFrame || stageEl.dataset.key !== key) {
       // Не теряем введённый текст, если экран ввода перерисовывается
       const typed = $('p-lie-input') ? $('p-lie-input').value : null;
@@ -2121,7 +2283,7 @@
           ${d ? `<div class="text-xs text-violet-200 mt-1">${d.parts.map(escapeHtml).join(' • ')}</div>` : '<div class="text-xs text-violet-300 mt-1">В следующий раз повезёт! 🍀</div>'}
         </div>
         <div class="glass rounded-3xl p-4">${scoreboardHtml(st, false, myPlayerId)}</div>
-        <div class="text-center text-xs text-violet-300 mt-3">Ведущий скоро запустит ${st.round + 1 === st.totalRounds ? 'ФИНАЛ 🔥' : (st.round >= st.totalRounds ? 'итоги 🏆' : 'следующий вопрос')}</div>`;
+        ${mpRole === 'host' ? '' : `<div class="text-center text-xs text-violet-300 mt-3">Ведущий скоро запустит ${st.round + 1 === st.totalRounds ? 'ФИНАЛ 🔥' : (st.round >= st.totalRounds ? 'итоги 🏆' : 'следующий вопрос')}</div>`}`;
     }
 
     if (st.phase === 'FINAL') {
@@ -2130,7 +2292,7 @@
         <h2 class="font-display font-black text-3xl neon-title mb-1 pop-in">Игра окончена!</h2>
         <div class="text-violet-200 mb-4">Ты на <b class="text-yellow-300">${place}-м</b> месте</div>
         <div class="glass rounded-3xl p-4">${podiumHtml(st, false)}</div>
-        <div class="text-xs text-violet-300 mt-3">Ведущий может запустить новую партию — оставайся в комнате</div>
+        ${mpRole === 'host' ? '' : '<div class="text-xs text-violet-300 mt-3">Ведущий может запустить новую партию — оставайся в комнате</div>'}
       </div>`;
     }
     return '';
@@ -2237,7 +2399,13 @@
   renderResumeBox();
 
   const lastName = lstore.get('bred_last_name');
-  if (lastName) $('join-name').value = lastName;
+  if (lastName) {
+    $('join-name').value = lastName;
+    $('create-name').value = lastName;
+  }
+  $('create-play').addEventListener('change', (ev) => {
+    $('create-play-box').classList.toggle('hidden', !ev.target.checked);
+  });
   $('join-code').addEventListener('input', (ev) => {
     ev.target.value = normalizeRoomCode(ev.target.value);
   });

@@ -159,7 +159,7 @@
               <div class="text-3xl">🎙️</div>
               <div>
                 <h2 class="font-display font-extrabold text-xl">Создать комнату</h2>
-                <p class="text-xs text-violet-300/80">Это экран ведущего: телевизор, ноутбук или трансляция в Discord</p>
+                <p class="text-xs text-violet-300/80">С телефона, ноутбука или телевизора</p>
               </div>
             </div>
             <div class="grid grid-cols-2 gap-3 text-sm">
@@ -196,6 +196,15 @@
                   <option value="60">60 сек</option>
                 </select>
               </label>
+            </div>
+            <label class="mt-4 flex items-center gap-2 text-sm font-semibold cursor-pointer select-none">
+              <input type="checkbox" id="create-play" checked class="w-5 h-5 accent-pink-500" />
+              🎮 Я тоже играю с этого устройства
+            </label>
+            <div id="create-play-box" class="mt-3">
+              <input id="create-name" maxlength="16" autocomplete="nickname" placeholder="Твоё имя" class="w-full bg-black/40 border border-violet-700 rounded-xl px-3 py-2.5 text-base focus:outline-none focus:border-pink-500" />
+              <div id="create-avatars" class="grid grid-cols-8 gap-1.5 mt-2"></div>
+              <p class="text-[11px] text-violet-300/80 mt-2">На твоём экране будет и управление комнатой, и собственный пульт. Можно создавать комнату прямо с телефона.</p>
             </div>
             <button type="button" onclick="window.startHostSession()" class="mt-5 w-full py-3.5 rounded-2xl font-display font-black text-lg bg-gradient-to-r from-pink-500 to-violet-600 hover:from-pink-400 hover:to-violet-500 neon-pink transition">
               Создать комнату 🚀
