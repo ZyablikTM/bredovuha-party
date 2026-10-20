@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0420" />
+  <title>БРЕДОВУХА — онлайн-игра для вечеринок</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MQTT.js поверх WebSockets (WSS): основной онлайн-канал, проходит через мобильные сети и NAT -->
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.5/dist/mqtt.min.js" async defer></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Montserrat:wght@700;800;900&display=swap" rel="stylesheet">
+  <script>
+    if (typeof tailwind !== 'undefined') {
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+              display: ['Montserrat', 'sans-serif']
+            }
+          }
+        }
+      };
+    }
+  </script>
+  <style>
+    body {
+      background-color: #0b0420;
+      background-image:
+        radial-gradient(ellipse at 15% 0%, rgba(236, 72, 153, 0.22), transparent 55%),
+        radial-gradient(ellipse at 85% 10%, rgba(34, 211, 238, 0.18), transparent 50%),
+        radial-gradient(ellipse at 50% 100%, rgba(139, 92, 246, 0.25), transparent 60%);
+      background-attachment: fixed;
+      color: #f5f3ff;
+      font-family: 'Inter', sans-serif;
+      overflow-x: hidden;
+    }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; }
+    .neon-title {
+      background: linear-gradient(90deg, #f472b6, #facc15, #22d3ee);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      filter: drop-shadow(0 0 12px rgba(244, 114, 182, 0.45));
+    }
+    .glass {
+      background: rgba(20, 10, 45, 0.78);
+      border: 1px solid rgba(167, 139, 250, 0.28);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(8px);
+    }
+    .neon-pink { box-shadow: 0 0 22px rgba(236, 72, 153, 0.45); }
+    .neon-cyan { box-shadow: 0 0 22px rgba(34, 211, 238, 0.4); }
+    .neon-gold { box-shadow: 0 0 26px rgba(250, 204, 21, 0.45); }
+    .blank {
+      display: inline-block;
+      min-width: 4.5em;
+      border-bottom: 4px solid #f472b6;
+      color: transparent;
+      line-height: 1;
+      transform: translateY(-0.1em);
+      animation: blankPulse 1.6s ease-in-out infinite;
+    }
+    .filled {
+      color: #4ade80;
+      border-bottom: 3px solid #4ade80;
+      padding: 0 0.15em;
+    }
+    @keyframes blankPulse {
+      0%, 100% { border-color: #f472b6; }
+      50% { border-color: #22d3ee; }
+    }
+    .pop-in { animation: popIn 0.45s cubic-bezier(0.2, 1.4, 0.4, 1) both; }
+    @keyframes popIn {
+      from { opacity: 0; transform: scale(0.85) translateY(10px); }
+      to { opacity: 1; transform: none; }
+    }
+    .fade-up { animation: fadeUp 0.5s ease both; }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: none; }
+    }
+    .late-1 { animation-delay: 1.3s; }
+    .late-2 { animation-delay: 2.1s; }
+    .stamp { animation: stamp 0.55s cubic-bezier(0.2, 1.6, 0.4, 1) both; }
+    @keyframes stamp {
+      from { opacity: 0; transform: scale(2.6) rotate(-14deg); }
+      to { opacity: 1; transform: scale(1) rotate(-8deg); }
+    }
+    .shake { animation: shake 0.45s ease; }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20%, 60% { transform: translateX(-6px); }
+      40%, 80% { transform: translateX(6px); }
+    }
+    .glow-pulse { animation: glowPulse 2s ease-in-out infinite; }
+    @keyframes glowPulse {
+      0%, 100% { box-shadow: 0 0 18px rgba(74, 222, 128, 0.35); }
+      50% { box-shadow: 0 0 42px rgba(74, 222, 128, 0.75); }
+    }
+    .timer-track { height: 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+    .timer-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #22d3ee, #a78bfa, #f472b6); transition: width 0.25s linear; }
+    .timer-fill.hurry { background: linear-gradient(90deg, #f97316, #ef4444); }
+    .podium-bar { animation: rise 0.9s cubic-bezier(0.2, 1.1, 0.4, 1) both; transform-origin: bottom; }
+    @keyframes rise { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+    .avatar-pick input:checked + span {
+      background: linear-gradient(135deg, #ec4899, #8b5cf6);
+      box-shadow: 0 0 16px rgba(236, 72, 153, 0.6);
+      transform: scale(1.08);
+    }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #12082b; }
+    ::-webkit-scrollbar-thumb { background: #3b2a6b; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #ec4899; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col selection:bg-pink-500 selection:text-white">
+
+  <!-- ШАПКА -->
+  <header class="sticky top-0 z-40 bg-[#0b0420]/90 backdrop-blur-md border-b border-violet-900/60">
+    <div class="max-w-6xl mx-auto px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+      <a href="./" class="font-display font-black text-xl sm:text-2xl tracking-tight neon-title select-none">БРЕДОВУХА</a>
+      <nav class="flex items-center gap-1 bg-black/30 rounded-xl p-1 border border-violet-900/60">
+        <button type="button" id="tab-online" onclick="window.switchMode('online')" class="px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition">🎙️ Онлайн</button>
+        <button type="button" id="tab-catalog" onclick="window.switchMode('catalog')" class="px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition">📚 Каталог вопросов</button>
+      </nav>
+      <button type="button" onclick="window.toggleSound()" class="px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold bg-black/30 border border-violet-900/60 hover:border-pink-500 transition flex items-center gap-1.5">
+        <span id="sound-icon">🔊</span><span id="sound-label" class="hidden sm:inline">Звук</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="flex-1 w-full max-w-6xl mx-auto px-4 py-5">
+
+    <!-- ===================== ОНЛАЙН ===================== -->
+    <section id="view-online">
+
+      <!-- Выбор роли -->
+      <div id="lobby-select">
+        <div class="text-center mb-6 fade-up">
+          <h1 id="lobby-heading" class="font-display font-black text-3xl sm:text-5xl neon-title mb-2">Соври так, чтобы поверили</h1>
+          <p id="lobby-sub" class="text-violet-200/80 max-w-2xl mx-auto text-sm sm:text-base">
+            Ведущий выводит на экран абсурдный, но реальный факт с пропуском. Игроки с телефонов вписывают правдоподобный бред, а потом ищут среди выдумок правду.
+          </p>
+        </div>
+
+        <div id="lobby-resume-box" class="hidden max-w-3xl mx-auto mb-5"></div>
+
+        <div id="lobby-cards" class="grid md:grid-cols-2 gap-5 max-w-5xl mx-auto">
+          <!-- Создать комнату -->
+          <div id="lobby-host-card" class="glass rounded-3xl p-5 sm:p-6 fade-up">
+            <div class="flex items-center gap-3 mb-4">
+              <div class="text-3xl">🎙️</div>
+              <div>
+                <h2 class="font-display font-extrabold text-xl">Создать комнату</h2>
+                <p class="text-xs text-violet-300/80">Это экран ведущего: телевизор, ноутбук или трансляция в Discord</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 text-sm">
+              <label class="col-span-2">
+                <span class="block text-xs font-semibold text-violet-300 mb-1">Пак вопросов</span>
+                <select id="create-pack" class="w-full bg-black/40 border border-violet-700 rounded-xl px-3 py-2.5 focus:outline-none focus:border-pink-500"></select>
+              </label>
+              <label>
+                <span class="block text-xs font-semibold text-violet-300 mb-1">Обычных раундов</span>
+                <select id="create-rounds" class="w-full bg-black/40 border border-violet-700 rounded-xl px-3 py-2.5 focus:outline-none focus:border-pink-500">
+                  <option value="3">3 + финал</option>
+                  <option value="4">4 + финал</option>
+                  <option value="5" selected>5 + финал</option>
+                  <option value="6">6 + финал</option>
+                  <option value="8">8 + финал</option>
+                  <option value="10">10 + финал</option>
+                </select>
+              </label>
+              <label>
+                <span class="block text-xs font-semibold text-violet-300 mb-1">Время на ложь</span>
+                <select id="create-lie" class="w-full bg-black/40 border border-violet-700 rounded-xl px-3 py-2.5 focus:outline-none focus:border-pink-500">
+                  <option value="30">30 сек</option>
+                  <option value="45" selected>45 сек</option>
+                  <option value="60">60 сек</option>
+                  <option value="90">90 сек</option>
+                </select>
+              </label>
+              <label class="col-span-2">
+                <span class="block text-xs font-semibold text-violet-300 mb-1">Время на голосование</span>
+                <select id="create-vote" class="w-full bg-black/40 border border-violet-700 rounded-xl px-3 py-2.5 focus:outline-none focus:border-pink-500">
+                  <option value="20">20 сек</option>
+                  <option value="30" selected>30 сек</option>
+                  <option value="45">45 сек</option>
+                  <option value="60">60 сек</option>
+                </select>
+              </label>
+            </div>
+            <button type="button" onclick="window.startHostSession()" class="mt-5 w-full py-3.5 rounded-2xl font-display font-black text-lg bg-gradient-to-r from-pink-500 to-violet-600 hover:from-pink-400 hover:to-violet-500 neon-pink transition">
+              Создать комнату 🚀
+            </button>
+          </div>
+
+          <!-- Войти игроком -->
+          <div id="lobby-join-card" class="glass rounded-3xl p-5 sm:p-6 fade-up">
+            <div class="flex items-center gap-3 mb-4">
+              <div class="text-3xl">📱</div>
+              <div>
+                <h2 class="font-display font-extrabold text-xl">Войти как игрок</h2>
+                <p class="text-xs text-violet-300/80">Телефон станет твоим пультом</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-3 text-sm">
+              <label class="col-span-1">
+                <span class="block text-xs font-semibold text-violet-300 mb-1">Код комнаты</span>
+                <input id="join-code" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ABCD" class="w-full bg-black/40 border border-violet-700 rounded-xl px-3 py-2.5 font-display font-black text-lg tracking-[0.2em] uppercase text-center focus:outline-none focus:border-cyan-400" />
+              </label>
+              <label class="col-span-2">
+                <span class="block text-xs font-semibold text-violet-300 mb-1">Твоё имя</span>
+                <input id="join-name" maxlength="16" autocomplete="nickname" placeholder="Например, Вася" class="w-full bg-black/40 border border-violet-700 rounded-xl px-3 py-2.5 text-base focus:outline-none focus:border-cyan-400" />
+              </label>
+            </div>
+            <div class="mt-3">
+              <span class="block text-xs font-semibold text-violet-300 mb-1.5">Аватар</span>
+              <div id="join-avatars" class="grid grid-cols-8 gap-1.5"></div>
+            </div>
+            <button type="button" onclick="window.startPlayerSession()" class="mt-5 w-full py-3.5 rounded-2xl font-display font-black text-lg bg-gradient-to-r from-cyan-500 to-violet-600 hover:from-cyan-400 hover:to-violet-500 neon-cyan transition">
+              Войти в игру 🎮
+            </button>
+            <button type="button" id="btn-show-host-card" onclick="window.showHostCardAgain()" class="hidden mt-3 w-full text-xs text-violet-300 hover:text-white underline underline-offset-2">Я ведущий — хочу создать свою комнату</button>
+          </div>
+        </div>
+
+        <div class="max-w-5xl mx-auto mt-6 grid sm:grid-cols-3 gap-3 text-sm fade-up">
+          <div class="glass rounded-2xl p-4"><div class="text-2xl mb-1">✍️</div><b>1. Соври.</b> <span class="text-violet-200/80">Впиши в пропуск правдоподобный бред. Угадаешь правду случайно — придётся сочинить другое.</span></div>
+          <div class="glass rounded-2xl p-4"><div class="text-2xl mb-1">🕵️</div><b>2. Найди правду.</b> <span class="text-violet-200/80">Правда — +1000 очков. За каждого, кто поверил в твою ложь, — +500.</span></div>
+          <div class="glass rounded-2xl p-4"><div class="text-2xl mb-1">🔥</div><b>3. Финал ×2.</b> <span class="text-violet-200/80">В последнем раунде очки удваиваются. Ставь 👍 смешным ответам: каждый лайк даёт автору +100.</span></div>
+        </div>
+      </div>
+
+      <!-- Экран ведущего -->
+      <div id="host-view" class="hidden">
+        <div class="glass rounded-2xl px-4 py-3 mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 justify-between">
+          <div class="flex items-center gap-3">
+            <div class="text-xs text-violet-300 leading-tight">Код<br>комнаты</div>
+            <div id="host-code" class="font-display font-black text-3xl tracking-[0.18em] text-yellow-300">····</div>
+          </div>
+          <div class="flex items-center gap-2 text-xs text-violet-200">
+            <span id="host-net-dot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+            <span id="host-net-info">Подключение…</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button type="button" onclick="window.toggleQrModal(true)" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-black/40 border border-violet-700 hover:border-pink-500">📷 QR</button>
+            <button type="button" onclick="window.copyInviteLink()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-black/40 border border-violet-700 hover:border-pink-500">🔗 Ссылка</button>
+            <button type="button" onclick="window.openTestPlayerTab()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-black/40 border border-violet-700 hover:border-pink-500" title="Открыть пульт игрока в новой вкладке">🧪 Тест-игрок</button>
+            <button type="button" onclick="window.hostCloseRoom()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-950/70 border border-rose-800 hover:bg-rose-800">🚪 Закрыть</button>
+          </div>
+        </div>
+        <div id="host-stage"></div>
+      </div>
+
+      <!-- Пульт игрока -->
+      <div id="player-view" class="hidden max-w-xl mx-auto">
+        <div class="glass rounded-2xl px-4 py-2.5 mb-4">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <span id="pl-avatar" class="text-3xl">🦊</span>
+              <div class="min-w-0">
+                <div id="pl-name" class="font-display font-extrabold truncate">Игрок</div>
+                <div id="pl-room" class="text-[11px] text-violet-300">Комната ····</div>
+              </div>
+            </div>
+            <div class="text-right">
+              <div id="pl-score" class="font-display font-black text-xl text-yellow-300">0</div>
+              <div class="text-[10px] text-violet-300 uppercase tracking-wider">очков</div>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-violet-900/60">
+            <div class="flex items-center gap-1.5 text-[11px] text-violet-200 min-w-0">
+              <span id="pl-conn-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0"></span>
+              <span id="pl-conn-info" class="truncate">Подключение…</span>
+            </div>
+            <div class="flex items-center gap-1 shrink-0">
+              <span id="pl-pending" class="hidden text-[11px] text-amber-300">⏳</span>
+              <button type="button" onclick="window.manualReconnectPlayer()" class="px-2 py-0.5 rounded text-[11px] bg-black/40 border border-violet-700 hover:border-cyan-400" title="Переподключиться">↻</button>
+              <button type="button" onclick="window.playerLeave()" class="px-2 py-0.5 rounded text-[11px] bg-black/40 border border-violet-700 hover:border-rose-500">Выйти</button>
+            </div>
+          </div>
+        </div>
+        <div id="player-stage"></div>
+      </div>
+    </section>
+
+    <!-- ===================== КАТАЛОГ ===================== -->
+    <section id="view-catalog" class="hidden">
+      <div class="flex flex-wrap items-end justify-between gap-3 mb-4">
+        <div>
+          <h2 class="font-display font-black text-2xl sm:text-3xl neon-title">Каталог вопросов</h2>
+          <p id="catalog-count" class="text-sm text-violet-300/80"></p>
+        </div>
+        <input id="catalog-search" type="search" placeholder="🔎 Поиск по тексту…" class="w-full sm:w-72 bg-black/40 border border-violet-700 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-pink-500" />
+      </div>
+      <div id="catalog-packs" class="flex flex-wrap gap-1.5 mb-4"></div>
+      <div id="catalog-grid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
+    </section>
+  </main>
+
+  <footer class="text-center text-[11px] text-violet-400/60 py-4">
+    Бредовуха • 150 реальных фактов • онлайн через MQTT (EMQX + HiveMQ)
+  </footer>
+
+  <!-- QR-модалка -->
+  <div id="qr-modal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="glass rounded-3xl p-6 max-w-sm w-full text-center pop-in">
+      <h3 class="font-display font-black text-xl mb-1">Наведи камеру телефона</h3>
+      <p id="qr-room-code" class="text-yellow-300 font-display font-black text-2xl tracking-[0.18em] mb-3"></p>
+      <div id="qr-box" class="bg-white rounded-2xl p-3 inline-block"></div>
+      <input id="invite-url" readonly class="mt-3 w-full bg-black/40 border border-violet-700 rounded-lg px-2 py-1.5 text-xs text-violet-200" />
+      <button type="button" onclick="window.toggleQrModal(false)" class="mt-3 w-full py-2.5 rounded-xl font-bold bg-violet-700 hover:bg-violet-600">Закрыть</button>
+    </div>
+  </div>
+
+  <div id="toast-box" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] flex flex-col gap-2 items-center w-[92%] max-w-sm pointer-events-none"></div>
+
+  <script src="./js/questions.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>
