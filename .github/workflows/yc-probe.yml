@@ -3,21 +3,43 @@ on:
   push:
     branches: [claude/lucid-morse-20daf0]
     paths: [.github/workflows/yc-probe.yml]
+permissions:
+  id-token: write
+  contents: read
 jobs:
   probe:
     runs-on: ubuntu-latest
+    env:
+      YC_SA_ID: aje066l1cifojvc839sd
     steps:
+      - name: Get IAM token via workload identity federation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const idToken = await core.getIDToken('https://github.com/ZyablikTM');
+            const body = new URLSearchParams({
+              grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+              requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+              audience: process.env.YC_SA_ID,
+              subject_token: idToken,
+              subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'
+            });
+            const res = await fetch('https://auth.yandex.cloud/oauth/token', { method: 'POST', body });
+            const json = await res.json();
+            if (!json.access_token) {
+              core.setFailed(`token exchange failed: HTTP ${res.status} ${json.error || ''} ${json.error_description || ''}`);
+              return;
+            }
+            core.setSecret(json.access_token);
+            core.exportVariable('YC_IAM_TOKEN', json.access_token);
+            console.log('IAM token received');
       - name: Install yc
         run: |
           curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "$HOME/yc" -n
           echo "$HOME/yc/bin" >> "$GITHUB_PATH"
       - name: Probe
-        env:
-          YC_TOKEN: ${{ secrets.YC_TOKEN }}
         run: |
-          test -n "$YC_TOKEN" || { echo "YC_TOKEN secret is empty"; exit 1; }
-          yc config set token "$YC_TOKEN"
-          yc version
-          echo "== clouds"; yc resource-manager cloud list
-          echo "== folders"; yc resource-manager folder list
-          echo "== billing"; yc billing account list || true
+          echo "== clouds (REST)"
+          curl -s -H "Authorization: Bearer $YC_IAM_TOKEN" https://resource-manager.api.cloud.yandex.net/resource-manager/v1/clouds
+          echo; echo "== yc with --token"
+          yc resource-manager folder list --token "$YC_IAM_TOKEN" || echo "yc --token failed"
