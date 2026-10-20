@@ -21,7 +21,7 @@ if [ -z "$SA_ID" ]; then
   SA_ID=$(yf iam service-account create --name "$SA_NAME" --description "Бредовуха: сервер-пересыльщик" --format json | jq -r .id)
   echo "Создан сервисный аккаунт $SA_ID"
 fi
-for role in ydb.editor api-gateway.websocketWriter functions.functionInvoker; do
+for role in ydb.editor api-gateway.websocketWriter functions.functionInvoker logging.writer; do
   y resource-manager folder add-access-binding --id "$FOLDER_ID" --role "$role" --service-account-id "$SA_ID" >/dev/null 2>&1 \
     && echo "Роль $role выдана" || echo "Роль $role уже есть"
 done
@@ -37,6 +37,14 @@ YDB_FULL=$(echo "$DB_JSON" | jq -r .endpoint)
 YDB_ENDPOINT=${YDB_FULL%%/?database=*}
 YDB_DATABASE=${YDB_FULL##*database=}
 echo "YDB: $YDB_ENDPOINT $YDB_DATABASE"
+
+# --- Группа логов (хранит 1 день) --------------------------------------------
+LOG_NAME=bred-logs
+LOG_ID=$(yf logging group get --name "$LOG_NAME" --format json 2>/dev/null | jq -r '.id // empty' || true)
+if [ -z "$LOG_ID" ]; then
+  LOG_ID=$(yf logging group create --name "$LOG_NAME" --retention-period 24h --format json | jq -r .id)
+  echo "Создана группа логов $LOG_ID"
+fi
 
 # --- Функция ------------------------------------------------------------------
 FN_NAME=bred-relay
@@ -59,6 +67,7 @@ version_create() {
     --service-account-id "$SA_ID" \
     --environment "YDB_ENDPOINT=$YDB_ENDPOINT" \
     --environment "YDB_DATABASE=$YDB_DATABASE" \
+    --log-group-id "$LOG_ID" \
     --source-path /tmp/relay.zip
 }
 version_create nodejs22 || { echo "nodejs22 недоступен, пробую nodejs18"; version_create nodejs18; }
@@ -81,11 +90,17 @@ paths:
 EOF
 GW_JSON=$(yf serverless api-gateway get --name "$GW_NAME" --format json 2>/dev/null || true)
 if [ -z "$GW_JSON" ]; then
-  GW_JSON=$(yf serverless api-gateway create --name "$GW_NAME" --spec /tmp/gw.yaml --format json)
+  GW_JSON=$(yf serverless api-gateway create --name "$GW_NAME" --spec /tmp/gw.yaml --log-group-id "$LOG_ID" --format json)
   echo "Создан шлюз"
 else
-  GW_JSON=$(yf serverless api-gateway update --name "$GW_NAME" --spec /tmp/gw.yaml --format json)
+  GW_JSON=$(yf serverless api-gateway update --name "$GW_NAME" --spec /tmp/gw.yaml --log-group-id "$LOG_ID" --format json)
 fi
+
+# --- Проверка: вызов функции напрямую поддельным сообщением -------------------
+echo '{"requestContext":{"connectionId":"deploy-check","eventType":"MESSAGE"},"body":"{\"op\":\"sub\",\"t\":\"bredovuha_v1/CHECK/to_players\"}"}' > /tmp/ev.json
+echo "Проверочный вызов:"
+yf serverless function invoke --id "$FN_ID" --data "$(cat /tmp/ev.json)" || true
+echo
 DOMAIN=$(echo "$GW_JSON" | jq -r .domain)
 echo "RELAY_URL=wss://$DOMAIN/ws"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "RELAY_URL: \`wss://$DOMAIN/ws\`" >> "$GITHUB_STEP_SUMMARY"; fi
