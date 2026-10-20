@@ -3,8 +3,5 @@
   "version": "1.0.0",
   "private": true,
   "description": "Бредовуха: сервер-пересыльщик сообщений для Yandex Cloud Functions",
-  "main": "index.js",
-  "dependencies": {
-    "ydb-sdk": "5.11.1"
-  }
+  "main": "index.js"
 }

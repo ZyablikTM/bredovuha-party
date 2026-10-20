@@ -21,22 +21,30 @@ if [ -z "$SA_ID" ]; then
   SA_ID=$(yf iam service-account create --name "$SA_NAME" --description "Бредовуха: сервер-пересыльщик" --format json | jq -r .id)
   echo "Создан сервисный аккаунт $SA_ID"
 fi
-for role in ydb.editor api-gateway.websocketWriter functions.functionInvoker logging.writer; do
+for role in storage.editor api-gateway.websocketWriter functions.functionInvoker logging.writer; do
   y resource-manager folder add-access-binding --id "$FOLDER_ID" --role "$role" --service-account-id "$SA_ID" >/dev/null 2>&1 \
     && echo "Роль $role выдана" || echo "Роль $role уже есть"
 done
+y resource-manager folder remove-access-binding --id "$FOLDER_ID" --role ydb.editor --service-account-id "$SA_ID" >/dev/null 2>&1 || true
 
-# --- База YDB (serverless) ----------------------------------------------------
-DB_NAME=bred-db
-DB_JSON=$(yf ydb database get --name "$DB_NAME" --format json 2>/dev/null || true)
-if [ -z "$DB_JSON" ]; then
-  echo "Создаю базу YDB…"
-  DB_JSON=$(yf ydb database create --name "$DB_NAME" --serverless --format json)
+# Первая версия хранила данные в YDB, но база не выполняла запросы к таблицам.
+# Она больше не нужна — удаляем, если осталась.
+if yf ydb database get --name bred-db >/dev/null 2>&1; then
+  yf ydb database delete --name bred-db --async >/dev/null && echo "Неиспользуемая база bred-db удаляется"
 fi
-YDB_FULL=$(echo "$DB_JSON" | jq -r .endpoint)
-YDB_ENDPOINT=${YDB_FULL%%/?database=*}
-YDB_DATABASE=${YDB_FULL##*database=}
-echo "YDB: $YDB_ENDPOINT $YDB_DATABASE"
+
+# --- Хранилище: какое соединение у ведущего каждой комнаты ------------------
+BUCKET="bred-relay-$FOLDER_ID"
+if ! y storage bucket get --name "$BUCKET" >/dev/null 2>&1; then
+  yf storage bucket create --name "$BUCKET" --max-size 104857600 >/dev/null
+  echo "Создан бакет $BUCKET"
+fi
+# Старые записи о ведущих удаляются сами через сутки
+cat > /tmp/lifecycle.json <<'EOF'
+{"rules":[{"id":"expire-hosts","enabled":true,"filter":{"prefix":"hosts/"},"expiration":{"days":1}}]}
+EOF
+y storage bucket update --name "$BUCKET" --lifecycle-rules-from-file /tmp/lifecycle.json >/dev/null 2>&1 \
+  && echo "Автоудаление старых записей включено" || echo "Автоудаление не настроено (не критично)"
 
 # --- Группа логов (хранит 1 день) --------------------------------------------
 LOG_NAME=bred-logs
@@ -65,10 +73,9 @@ version_create() {
     --runtime "$1" \
     --entrypoint index.handler \
     --memory 128m \
-    --execution-timeout 30s \
+    --execution-timeout 10s \
     --service-account-id "$SA_ID" \
-    --environment "YDB_ENDPOINT=$YDB_ENDPOINT" \
-    --environment "YDB_DATABASE=$YDB_DATABASE" \
+    --environment "BUCKET=$BUCKET" \
     "${LOG_FLAG[@]}" \
     --source-path /tmp/relay.zip
 }
