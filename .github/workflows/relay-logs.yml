@@ -40,8 +40,9 @@ jobs:
           yc config profile create default >/dev/null
           yc config set endpoint api.cloud.yandex.net:443
           F=$(yc iam service-account get --id "$YC_SA_ID" --format json --token "$YC_IAM_TOKEN" | jq -r .folder_id)
+          for i in 1 2 3 4; do
+            echo "== diag $i"
+            yc serverless function invoke --name bred-relay --folder-id "$F" --data '{"diag":1}' --token "$YC_IAM_TOKEN" | jq -r '.body | fromjson | .steps[]' | cut -c1-400 || true
+          done
           echo "== function logs"
-          yc serverless function logs --name bred-relay --folder-id "$F" --group-name bred-logs --since 30m --limit 200 --token "$YC_IAM_TOKEN" | tail -120
-          echo "== gateway logs"
-          GW=$(yc serverless api-gateway get --name bred-relay-gw --folder-id "$F" --format json --token "$YC_IAM_TOKEN" | jq -r .log_options.log_group_id)
-          yc logging read --group-name bred-logs --folder-id "$F" --since 30m --limit 60 --resource-types serverless.apigateway --token "$YC_IAM_TOKEN" | tail -60 || true
+          yc serverless function logs --name bred-relay --folder-id "$F" --since 30m --limit 100 --token "$YC_IAM_TOKEN" | tail -60 || true
