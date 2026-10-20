@@ -1,24 +1,27 @@
-name: yc-probe
+name: deploy-relay
+# Разворачивает сервер-пересыльщик в Yandex Cloud.
+# Вход без ключей: GitHub выдаёт OIDC-токен, Яндекс меняет его на IAM-токен
+# сервисного аккаунта github-deploy через федерацию сервисных аккаунтов.
 on:
   push:
-    branches: [claude/lucid-morse-20daf0]
-    paths: [.github/workflows/yc-probe.yml]
+    branches: [main, claude/lucid-morse-20daf0]
+    paths: [server/**, .github/workflows/deploy-relay.yml]
+  workflow_dispatch:
 permissions:
   id-token: write
   contents: read
 jobs:
-  probe:
+  deploy:
     runs-on: ubuntu-latest
     env:
       YC_SA_ID: aje066l1cifojvc839sd
     steps:
+      - uses: actions/checkout@v4
       - name: Get IAM token via workload identity federation
         uses: actions/github-script@v7
         with:
           script: |
             const idToken = await core.getIDToken('https://github.com/ZyablikTM');
-            const claims = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64url').toString());
-            console.log(`iss=${claims.iss} aud=${claims.aud} sub=${claims.sub}`);
             const body = new URLSearchParams({
               grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
               requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
@@ -34,14 +37,9 @@ jobs:
             }
             core.setSecret(json.access_token);
             core.exportVariable('YC_IAM_TOKEN', json.access_token);
-            console.log('IAM token received');
       - name: Install yc
         run: |
           curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "$HOME/yc" -n
           echo "$HOME/yc/bin" >> "$GITHUB_PATH"
-      - name: Probe
-        run: |
-          echo "== clouds (REST)"
-          curl -s -H "Authorization: Bearer $YC_IAM_TOKEN" https://resource-manager.api.cloud.yandex.net/resource-manager/v1/clouds
-          echo; echo "== yc with --token"
-          yc resource-manager folder list --token "$YC_IAM_TOKEN" || echo "yc --token failed"
+      - name: Deploy
+        run: bash server/deploy.sh

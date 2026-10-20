@@ -1,2 +1,3 @@
 .claude/
 PROMT_*.txt
+node_modules/
