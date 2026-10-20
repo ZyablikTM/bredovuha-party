@@ -139,8 +139,19 @@ async function diagnose(context) {
     const desc = await driver.tableClient.withSessionRetry(s => s.describeTable(TABLE), 15000, 1)
       .then(d => (d.columns || []).map(c => c.name).join(','), e => 'ERR ' + (e && e.message || String(e)).slice(0, 200));
     step('describe', desc);
-    await driver.tableClient.withSessionRetry(s => readRow(s, 'diag'), 15000, 1);
-    step('query-ok');
+    const plain = await driver.tableClient.withSessionRetry(async (s) => {
+      try { await s.describeTable('diag_plain'); } catch (e) {
+        await s.createTable('diag_plain', new TableDescription()
+          .withColumns(new Column('k', Types.optional(Types.UTF8)), new Column('v', Types.optional(Types.UTF8)))
+          .withPrimaryKey('k'));
+      }
+      await s.executeQuery('UPSERT INTO diag_plain (k, v) VALUES ("a", "b");');
+      await s.executeQuery('SELECT v FROM diag_plain WHERE k = "a";');
+    }, 15000, 1).then(() => 'ok', e => 'ERR ' + (e && e.message || String(e)).slice(0, 200));
+    step('plain-table', plain);
+    const count = await driver.tableClient.withSessionRetry(s => s.executeQuery(`SELECT COUNT(*) AS n FROM ${TABLE};`), 15000, 1)
+      .then(() => 'ok', e => 'ERR ' + (e && e.message || String(e)).slice(0, 120));
+    step('count-topics', count);
   } catch (e) {
     step('error', (e && (e.stack || e.message) || String(e)).slice(0, 600));
   }
