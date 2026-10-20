@@ -133,7 +133,13 @@ async function diagnose(context) {
     step('tcp-ydb', String(r.status));
     const driver = await Promise.race([getDriver(), new Promise((_, rej) => setTimeout(() => rej(new Error('driver timeout 20s')), 20000))]);
     step('driver-ready');
-    await driver.tableClient.withSessionRetry(s => readRow(s, 'diag'));
+    const one = await driver.tableClient.withSessionRetry(s => s.executeQuery('SELECT 1 AS one;'), 15000, 1)
+      .then(() => 'ok', e => (e && e.message || String(e)).slice(0, 200));
+    step('select-1', one);
+    const desc = await driver.tableClient.withSessionRetry(s => s.describeTable(TABLE), 15000, 1)
+      .then(d => (d.columns || []).map(c => c.name).join(','), e => 'ERR ' + (e && e.message || String(e)).slice(0, 200));
+    step('describe', desc);
+    await driver.tableClient.withSessionRetry(s => readRow(s, 'diag'), 15000, 1);
     step('query-ok');
   } catch (e) {
     step('error', (e && (e.stack || e.message) || String(e)).slice(0, 600));
