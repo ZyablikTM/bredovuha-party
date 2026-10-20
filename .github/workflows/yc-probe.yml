@@ -1,0 +1,23 @@
+name: yc-probe
+on:
+  push:
+    branches: [claude/lucid-morse-20daf0]
+    paths: [.github/workflows/yc-probe.yml]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install yc
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "$HOME/yc" -n
+          echo "$HOME/yc/bin" >> "$GITHUB_PATH"
+      - name: Probe
+        env:
+          YC_TOKEN: ${{ secrets.YC_TOKEN }}
+        run: |
+          test -n "$YC_TOKEN" || { echo "YC_TOKEN secret is empty"; exit 1; }
+          yc config set token "$YC_TOKEN"
+          yc version
+          echo "== clouds"; yc resource-manager cloud list
+          echo "== folders"; yc resource-manager folder list
+          echo "== billing"; yc billing account list || true
