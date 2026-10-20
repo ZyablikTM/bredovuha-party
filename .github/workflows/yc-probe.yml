@@ -17,6 +17,8 @@ jobs:
         with:
           script: |
             const idToken = await core.getIDToken('https://github.com/ZyablikTM');
+            const claims = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64url').toString());
+            console.log(`iss=${claims.iss} aud=${claims.aud} sub=${claims.sub}`);
             const body = new URLSearchParams({
               grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
               requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
