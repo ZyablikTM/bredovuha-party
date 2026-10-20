@@ -65,7 +65,7 @@ version_create() {
     --runtime "$1" \
     --entrypoint index.handler \
     --memory 128m \
-    --execution-timeout 10s \
+    --execution-timeout 30s \
     --service-account-id "$SA_ID" \
     --environment "YDB_ENDPOINT=$YDB_ENDPOINT" \
     --environment "YDB_DATABASE=$YDB_DATABASE" \
@@ -99,7 +99,7 @@ else
 fi
 
 # --- Проверка: вызов функции напрямую поддельным сообщением -------------------
-echo '{"requestContext":{"connectionId":"deploy-check","eventType":"MESSAGE"},"body":"{\"op\":\"sub\",\"t\":\"bredovuha_v1/CHECK/to_players\"}"}' > /tmp/ev.json
+echo '{"diag":1}' > /tmp/ev.json
 echo "Проверочный вызов:"
 yf serverless function invoke --id "$FN_ID" --data "$(cat /tmp/ev.json)" || true
 echo

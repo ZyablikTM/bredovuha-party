@@ -122,6 +122,25 @@ function reply(obj) {
   };
 }
 
+// Диагностика для проверки после развёртывания: {"diag":1} → по шагам, сколько заняло и где упало
+async function diagnose(context) {
+  const t0 = Date.now();
+  const steps = [];
+  const step = (name, extra) => steps.push(`${name} +${Date.now() - t0}ms${extra ? ' ' + extra : ''}`);
+  step('start', `token=${iamToken ? 'yes' : 'no'} ctxKeys=${Object.keys(context || {}).join('|')}`);
+  try {
+    const r = await fetch('https://ydb.serverless.yandexcloud.net:2135', { method: 'HEAD' }).catch(e => ({ status: 'ERR ' + e.message }));
+    step('tcp-ydb', String(r.status));
+    const driver = await Promise.race([getDriver(), new Promise((_, rej) => setTimeout(() => rej(new Error('driver timeout 20s')), 20000))]);
+    step('driver-ready');
+    await driver.tableClient.withSessionRetry(s => readRow(s, 'diag'));
+    step('query-ok');
+  } catch (e) {
+    step('error', (e && (e.stack || e.message) || String(e)).slice(0, 600));
+  }
+  return reply({ steps });
+}
+
 let loggedEventShape = false;
 
 module.exports.handler = async function (event, context) {
@@ -130,6 +149,7 @@ module.exports.handler = async function (event, context) {
     loggedEventShape = true;
     console.log('event keys:', Object.keys(event || {}).join(','), 'rc:', JSON.stringify(event && event.requestContext || {}).slice(0, 400));
   }
+  if (event && event.diag) return diagnose(context);
   const connId = getConnId(event);
   const rc = event.requestContext || {};
   if (rc.eventType && rc.eventType !== 'MESSAGE') return reply(null);   // CONNECT / DISCONNECT
