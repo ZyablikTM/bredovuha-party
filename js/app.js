@@ -23,10 +23,14 @@
   // НАСТРОЙКИ
   // ===========================================================================
   const NET_NS = 'bredovuha_v1';
+  // Подключаемся ко всем брокерам сразу: в разных сетях блокируются разные порты.
+  // Дубликаты сообщений отсеиваются (номер версии состояния у игроков, номер действия у ведущего).
   const MQTT_BROKERS = [
     'wss://broker.emqx.io:8084/mqtt',
+    'wss://test.mosquitto.org:8081',
     'wss://broker.hivemq.com:8884/mqtt'
   ];
+  const BROKER_LABELS = { 'broker.emqx.io': 'EMQX', 'test.mosquitto.org': 'Mosquitto', 'broker.hivemq.com': 'HiveMQ' };
   const HOST_HEARTBEAT_MS = 4000;   // ведущий повторно рассылает состояние
   const PLAYER_PING_MS = 4000;      // игрок сообщает «я на связи»
   const OFFLINE_AFTER_MS = 13000;   // без сигнала дольше — считаем офлайн
@@ -316,7 +320,7 @@
   let myName = '';
   let myAvatar = AVATARS[0];
 
-  const net = { mqtt: [], mqttWaitTimer: null, bc: null };
+  const net = { mqtt: [], mqttWaitTimer: null, bc: null, startedAt: 0 };
   let tickTimer = null;
 
   // Только у ведущего
@@ -414,6 +418,7 @@
     }
     const role = mpRole;
     const code = roomCode;
+    net.startedAt = Date.now();
     MQTT_BROKERS.forEach(url => {
       let client;
       try {
@@ -427,7 +432,11 @@
       } catch (e) {
         return;
       }
-      net.mqtt.push({ client, url });
+      const entry = { client, url, t0: Date.now(), log: [] };
+      const note = (e, x) => { if (entry.log.length < 40) entry.log.push(`${e}@${Date.now() - entry.t0}${x ? ':' + x : ''}`); };
+      net.mqtt.push(entry);
+      ['connect', 'reconnect', 'close', 'offline', 'end'].forEach(e => client.on(e, () => note(e)));
+      client.on('error', (err) => note('error', err && err.message));
 
       client.on('connect', () => {
         if (mpRole !== role || roomCode !== code) return;
@@ -466,6 +475,18 @@
     return net.mqtt.filter(m => m.client.connected).length;
   }
 
+  // Подробный статус связи: какие серверы подключены, загрузилась ли библиотека
+  function netDetails() {
+    if (typeof mqtt === 'undefined') {
+      return window.__mqttLib === 'failed' ? '⚠️ не загрузилась библиотека связи — проверьте интернет и обновите страницу' : 'загружаем библиотеку связи…';
+    }
+    if (!net.mqtt.length) return 'подключаемся к серверам…';
+    return net.mqtt.map(m => {
+      const host = (m.url.match(/wss:\/\/([^:/]+)/) || [])[1];
+      return `${BROKER_LABELS[host] || host} ${m.client.connected ? '✓' : '…'}`;
+    }).join(' · ');
+  }
+
   function setupBroadcast() {
     try {
       if ('BroadcastChannel' in window) {
@@ -488,7 +509,12 @@
     if (delayMs > 0) setTimeout(close, delayMs); else close();
   }
 
+  // Отладка из консоли браузера: __bredNet() показывает события по каждому серверу
+  const netHistory = [];
+  window.__bredNet = () => ({ current: net.mqtt.map(m => ({ url: m.url, connected: m.client.connected, log: m.log })), history: netHistory.slice(-20) });
+
   function reconnectTransports() {
+    netHistory.push(`reconnectTransports @${new Date().toISOString().slice(11, 19)} (${document.visibilityState})`);
     teardownNet();
     setupBroadcast();
     setupMqtt();
@@ -516,14 +542,19 @@
     else if (mpRole === 'player') renderPlayerConn();
   }
 
-  // Возврат на вкладку / восстановление сети: мобильные браузеры рвут сокеты в фоне
+  // Возврат на вкладку / восстановление сети: мобильные браузеры рвут сокеты в фоне.
+  // Пересоздаём подключения, только если они уже успели бы подняться, но связи нет:
+  // иначе каждое переключение между приложениями обрывало бы ещё идущее подключение.
+  const CONNECT_GRACE_MS = 12000;
   function onResume() {
+    const settling = Date.now() - net.startedAt < CONNECT_GRACE_MS;
     if (mpRole === 'player' && !playerHalted) {
-      if (mqttConnectedCount() === 0 || Date.now() - lastHostContact > 6000) reconnectTransports();
+      const hostLost = lastHostContact > 0 && Date.now() - lastHostContact > 6000;
+      if (!settling && (mqttConnectedCount() === 0 || hostLost)) reconnectTransports();
       sendJoin();
       if (inFlight) inFlight.sentAt = 0;
     } else if (mpRole === 'host') {
-      if (mqttConnectedCount() === 0) reconnectTransports();
+      if (!settling && mqttConnectedCount() === 0) reconnectTransports();
       requestWakeLock();
       broadcastNow();
     }
@@ -1443,7 +1474,7 @@
     const players = Object.values(gameState.players);
     const online = players.filter(p => isPlayerOnline(p.id)).length;
     $('host-net-dot').className = `w-2.5 h-2.5 rounded-full ${mq > 0 ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`;
-    $('host-net-info').textContent = `Серверы ${mq}/${MQTT_BROKERS.length} • Игроков онлайн ${online}/${players.length}`;
+    $('host-net-info').textContent = `${netDetails()} • Игроков онлайн ${online}/${players.length}`;
   }
 
   function hostViewKey() {
@@ -2111,7 +2142,6 @@
   // ===========================================================================
   function renderPlayerConn() {
     if (mpRole !== 'player') return;
-    const mq = mqttConnectedCount();
     const synced = lastStateV >= 0;
     const fresh = synced && Date.now() - lastHostContact < OFFLINE_AFTER_MS;
     let dotCls = 'bg-amber-400 animate-pulse';
@@ -2127,7 +2157,9 @@
       text = `Ведущий не отвечает ${Math.round((Date.now() - lastHostContact) / 1000)} с…`;
     }
     $('pl-conn-dot').className = `w-2 h-2 rounded-full shrink-0 ${dotCls}`;
-    $('pl-conn-info').textContent = `${text} • серверы ${mq}/${MQTT_BROKERS.length}`;
+    $('pl-conn-info').textContent = `${text} • ${netDetails()}`;
+    const waitNet = $('p-net-detail');
+    if (waitNet) waitNet.textContent = `Связь: ${netDetails()}${synced ? ' • ведущий найден' : ''}`;
   }
 
   function playerViewKey(st, me) {
@@ -2198,6 +2230,7 @@
         <div class="text-5xl mb-3 ${full ? '' : 'animate-bounce'}">${full ? '😔' : '📡'}</div>
         <div class="font-display font-bold text-lg">${full ? 'Комната заполнена' : 'Подключаемся к ведущему…'}</div>
         <div class="text-sm text-violet-300 mt-2">${full ? `В игре уже ${MAX_PLAYERS} игроков.` : 'Если долго не подключается — проверьте код комнаты или нажмите ↻.'}</div>
+        ${full ? '' : '<div id="p-net-detail" class="text-xs text-violet-400 mt-3"></div>'}
       </div>`;
     }
 

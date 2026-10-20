@@ -6,8 +6,32 @@
   <meta name="theme-color" content="#0b0420" />
   <title>БРЕДОВУХА — онлайн-игра для вечеринок</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- MQTT.js поверх WebSockets (WSS): основной онлайн-канал, проходит через мобильные сети и NAT -->
-  <script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.5/dist/mqtt.min.js" async defer></script>
+  <!-- MQTT.js поверх WebSockets (WSS): основной онлайн-канал. Грузится с запасных CDN по очереди:
+       если один недоступен или завис дольше 8 с — пробуем следующий -->
+  <script>
+    (function () {
+      var urls = [
+        'https://cdn.jsdelivr.net/npm/mqtt@5.3.5/dist/mqtt.min.js',
+        'https://unpkg.com/mqtt@5.3.5/dist/mqtt.min.js',
+        'https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.5/mqtt.min.js'
+      ];
+      var i = 0;
+      window.__mqttLib = 'loading';
+      function next() {
+        if (typeof mqtt !== 'undefined') { window.__mqttLib = 'ok'; return; }
+        if (i >= urls.length) { window.__mqttLib = 'failed'; return; }
+        var attempt = ++i;
+        var s = document.createElement('script');
+        s.src = urls[attempt - 1];
+        s.async = true;
+        s.onload = function () { if (typeof mqtt !== 'undefined') window.__mqttLib = 'ok'; else if (i === attempt) next(); };
+        s.onerror = function () { if (i === attempt) next(); };
+        setTimeout(function () { if (typeof mqtt === 'undefined' && i === attempt) next(); }, 8000);
+        document.head.appendChild(s);
+      }
+      next();
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Montserrat:wght@700;800;900&display=swap" rel="stylesheet">
