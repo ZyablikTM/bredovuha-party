@@ -42,9 +42,11 @@ echo "YDB: $YDB_ENDPOINT $YDB_DATABASE"
 LOG_NAME=bred-logs
 LOG_ID=$(yf logging group get --name "$LOG_NAME" --format json 2>/dev/null | jq -r '.id // empty' || true)
 if [ -z "$LOG_ID" ]; then
-  LOG_ID=$(yf logging group create --name "$LOG_NAME" --retention-period 24h --format json | jq -r .id)
-  echo "Создана группа логов $LOG_ID"
+  LOG_ID=$(yf logging group create --name "$LOG_NAME" --retention-period 24h --format json 2>/dev/null | jq -r '.id // empty' || true)
+  [ -z "$LOG_ID" ] && LOG_ID=$(yf logging group get --name "$LOG_NAME" --format json 2>/dev/null | jq -r '.id // empty' || true)
+  echo "Группа логов: ${LOG_ID:-не создана, логи пропускаю}"
 fi
+LOG_FLAG=(); [ -n "$LOG_ID" ] && LOG_FLAG=(--log-group-id "$LOG_ID")
 
 # --- Функция ------------------------------------------------------------------
 FN_NAME=bred-relay
@@ -67,7 +69,7 @@ version_create() {
     --service-account-id "$SA_ID" \
     --environment "YDB_ENDPOINT=$YDB_ENDPOINT" \
     --environment "YDB_DATABASE=$YDB_DATABASE" \
-    --log-group-id "$LOG_ID" \
+    "${LOG_FLAG[@]}" \
     --source-path /tmp/relay.zip
 }
 version_create nodejs22 || { echo "nodejs22 недоступен, пробую nodejs18"; version_create nodejs18; }
@@ -90,10 +92,10 @@ paths:
 EOF
 GW_JSON=$(yf serverless api-gateway get --name "$GW_NAME" --format json 2>/dev/null || true)
 if [ -z "$GW_JSON" ]; then
-  GW_JSON=$(yf serverless api-gateway create --name "$GW_NAME" --spec /tmp/gw.yaml --log-group-id "$LOG_ID" --format json)
+  GW_JSON=$(yf serverless api-gateway create --name "$GW_NAME" --spec /tmp/gw.yaml "${LOG_FLAG[@]}" --format json)
   echo "Создан шлюз"
 else
-  GW_JSON=$(yf serverless api-gateway update --name "$GW_NAME" --spec /tmp/gw.yaml --log-group-id "$LOG_ID" --format json)
+  GW_JSON=$(yf serverless api-gateway update --name "$GW_NAME" --spec /tmp/gw.yaml "${LOG_FLAG[@]}" --format json)
 fi
 
 # --- Проверка: вызов функции напрямую поддельным сообщением -------------------
