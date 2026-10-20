@@ -8,6 +8,7 @@ cd "$(dirname "$0")"
 y() { yc "$@" --token "$YC_IAM_TOKEN"; }
 # Команды serverless требуют существующего профиля, даже если токен передан флагом
 yc config profile get default >/dev/null 2>&1 || yc config profile create default >/dev/null
+yc config set endpoint api.cloud.yandex.net:443
 
 FOLDER_ID=$(y iam service-account get --id "$YC_SA_ID" --format json | jq -r .folder_id)
 echo "Каталог: $FOLDER_ID"
